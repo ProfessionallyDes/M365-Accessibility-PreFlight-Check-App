@@ -21,7 +21,7 @@ def check_docx_basic(file_obj):
     doc = Document(file_obj)
 
     # Headings present?
-    has_heading = any(p.style and str(p.style.name).startswith("Heading") for p in doc.paragraphs)
+    has_heading = any(p.style and str(p.style.name).lower().startswith("heading") for p in doc.paragraphs)
     if not has_heading:
         issues.append("No headings found (use Heading 1/2/3 styles for document structure).")
 
@@ -115,6 +115,15 @@ def check_pptx(file_obj):
 # -----------------------------
 # PDF checks
 # -----------------------------
+def pdf_is_tagged(doc) -> bool:
+    """Return True if the PDF has a structure tree (i.e., is a tagged PDF)."""
+    try:
+        cat_xref = doc.pdf_catalog()                       # catalog object xref
+        key = doc.xref_get_key(cat_xref, "StructTreeRoot") # returns (type, value) or ('null','null')
+        return key is not None and key[0] != "null" and key[0] != "nil"
+    except Exception:
+        return False
+
 def check_pdf(file_obj):
     """Basic PDF checks: tagged structure, rough heading proxy, link-text reminder."""
     issues = []
@@ -122,7 +131,7 @@ def check_pdf(file_obj):
     pdf = fitz.open(stream=file_bytes, filetype="pdf")
 
     # Tagged PDF?
-    if not pdf.is_tagged:
+    if not pdf_is_tagged(pdf):
         issues.append("PDF is not tagged (no accessibility structure). Export with 'Create tagged PDF' enabled.")
 
     # Heuristic: look for large text spans as rough heading proxy
