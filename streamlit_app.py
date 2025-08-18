@@ -20,7 +20,7 @@ st.set_page_config(page_title="M365 Accessibility Pre-Flight Check", layout="wid
 st.title("M365 Accessibility Pre-Flight Check")
 st.write("Upload your documents (.docx, .pptx, .pdf) to check for basic accessibility issues.")
 
-HF_API = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+HF_API = "https://huggingface.co/Salesforce/blip-image-captioning-base"
 HF_KEY = os.getenv("HF_API_KEY")  # set this in Streamlit Cloud → Manage app → Settings → Secrets
 
 st.sidebar.markdown("### AI Alt-Text")
