@@ -8,6 +8,12 @@ from docx import Document           # from python-docx
 from pptx import Presentation       # from python-pptx
 import fitz                         # from pymupdf
 
+import os, requests
+
+HF_API = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+HF_KEY = os.getenv("HF_API_KEY")  # set this in Streamlit Cloud → Settings → Secrets
+
+
 st.set_page_config(page_title="M365 Accessibility Pre-Flight Check", layout="wide")
 st.title("M365 Accessibility Pre-Flight Check")
 st.write("Upload your documents (.docx, .pptx, .pdf) to check for basic accessibility issues.")
@@ -74,6 +80,28 @@ def check_docx_missing_alt_text(file_bytes: bytes):
             issues.append(f"All {total_imgs} image(s) have alt text. ✅")
 
     return issues
+def suggest_alt_text_via_hf(image_bytes: bytes) -> str | None:
+    """Return a short alt-text suggestion using BLIP via HF Inference API."""
+    if not HF_KEY:
+        return None
+    r = requests.post(HF_API, headers={"Authorization": f"Bearer {HF_KEY}"}, data=image_bytes, timeout=60)
+    if r.status_code == 200:
+        out = r.json()
+        if isinstance(out, list) and out and "generated_text" in out[0]:
+            return out[0]["generated_text"][:125]  # keep it concise
+    return None
+
+def extract_docx_image_blobs(file_bytes: bytes) -> list[bytes]:
+    """Return raw image bytes from a DOCX (best-effort)."""
+    doc = Document(io.BytesIO(file_bytes))
+    blobs = []
+    for rel in doc.part.rels.values():
+        if "image" in rel.reltype:
+            try:
+                blobs.append(rel.target_part.blob)
+            except Exception:
+                pass
+    return blobs
 
 
 # -----------------------------
@@ -179,6 +207,17 @@ if uploaded_files:
 
             # Merge results
             issues_list = (issues_basic or []) + (issues_alt or [])
+            # If some images are missing alt text, propose up to 3 suggestions
+            if any("appear to lack alt text" in m for m in issues_list):
+                imgs = extract_docx_image_blobs(docx_bytes)
+                suggestions = []
+                for b in imgs[:3]:
+                    s = suggest_alt_text_via_hf(b)
+                    if s:
+                        suggestions.append(s)
+                if suggestions:
+                    issues_list.append("Alt text suggestions: " + " | ".join(suggestions))
+
 
             # Reset pointer in case you read again later
             file.seek(0)
