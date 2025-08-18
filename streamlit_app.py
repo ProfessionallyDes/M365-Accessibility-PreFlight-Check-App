@@ -1,22 +1,95 @@
 import io
+import os
 import time
+from io import BytesIO
+
 import streamlit as st
 import pandas as pd
 
-# Parsers
-from docx import Document           # from python-docx
-from pptx import Presentation       # from python-pptx
-import fitz                         # from pymupdf
+# Parsers / libs
+from docx import Document           # python-docx
+from pptx import Presentation       # python-pptx
+import fitz                         # PyMuPDF
+import requests
+from PIL import Image               # pillow
 
-import os, requests
-
-HF_API = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
-HF_KEY = os.getenv("HF_API_KEY")  # set this in Streamlit Cloud → Settings → Secrets
-
-
+# -----------------------------
+# App config & sidebar status
+# -----------------------------
 st.set_page_config(page_title="M365 Accessibility Pre-Flight Check", layout="wide")
 st.title("M365 Accessibility Pre-Flight Check")
 st.write("Upload your documents (.docx, .pptx, .pdf) to check for basic accessibility issues.")
+
+HF_API = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
+HF_KEY = os.getenv("HF_API_KEY")  # set this in Streamlit Cloud → Manage app → Settings → Secrets
+
+st.sidebar.markdown("### AI Alt-Text")
+st.sidebar.write("HF key detected:" if HF_KEY else "HF key NOT found in secrets")
+
+# -----------------------------
+# Helpers for AI alt text
+# -----------------------------
+def _to_jpeg_bytes(raw: bytes) -> bytes:
+    """Convert arbitrary image bytes (PNG/EMF/etc.) to JPEG bytes before sending to HF API."""
+    try:
+        im = Image.open(BytesIO(raw)).convert("RGB")
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception:
+        # If Pillow can't parse, just return the original bytes
+        return raw
+
+def suggest_alt_text_via_hf(image_bytes: bytes, retries: int = 2) -> str | None:
+    """Return a short alt-text suggestion using BLIP via HF Inference API."""
+    if not HF_KEY:
+        return None
+
+    payload = _to_jpeg_bytes(image_bytes)
+    headers = {"Authorization": f"Bearer {HF_KEY}"}
+
+    for attempt in range(retries):
+        try:
+            r = requests.post(HF_API, headers=headers, data=payload, timeout=60)
+            if r.status_code != 200:
+                # Many HF models cold-start and return {'error': 'Model is loading'}
+                try:
+                    msg = r.json().get("error", f"HTTP {r.status_code}")
+                except Exception:
+                    msg = f"HTTP {r.status_code}"
+                st.sidebar.write(f"HF API: {msg} (attempt {attempt+1})")
+                time.sleep(2)
+                continue
+
+            out = r.json()
+            # BLIP typically returns: [{'generated_text': '...'}]
+            if isinstance(out, list) and out and isinstance(out[0], dict):
+                text = out[0].get("generated_text")
+                if text:
+                    return text[:125]
+            if isinstance(out, dict) and "generated_text" in out:
+                return str(out["generated_text"])[:125]
+
+            st.sidebar.write(f"HF response shape: {type(out).__name__}")
+            st.sidebar.write(str(out)[:120])
+            return None
+        except Exception as e:
+            st.sidebar.write(f"HF call error: {e} (attempt {attempt+1})")
+            time.sleep(2)
+
+    return None
+
+def extract_docx_image_blobs(file_bytes: bytes) -> list[bytes]:
+    """Return raw image bytes from a DOCX (best-effort)."""
+    doc = Document(io.BytesIO(file_bytes))
+    blobs = []
+    for rel in doc.part.rels.values():
+        if "image" in rel.reltype:
+            try:
+                blobs.append(rel.target_part.blob)
+            except Exception:
+                pass
+    return blobs
 
 # -----------------------------
 # DOCX checks
@@ -40,22 +113,20 @@ def check_docx_basic(file_obj):
 
     return issues
 
-
 def check_docx_missing_alt_text(file_bytes: bytes):
     """
     Best-effort scan of inline images to see if docPr@descr (alt text) is present.
-    Returns a list of issue strings (or an empty list).
+    Returns list[str] of issue messages.
     """
     issues = []
     doc = Document(io.BytesIO(file_bytes))
 
     total_imgs = 0
     missing = 0
-    # Try the python-docx inline_shapes path first
     try:
         for ish in doc.inline_shapes:
             total_imgs += 1
-            # Access the underlying XML (docx uses lxml under the hood)
+            # Access the underlying XML
             descr = ish._inline.docPr.get("descr")  # type: ignore[attr-defined]
             if not (descr and descr.strip()):
                 missing += 1
@@ -63,7 +134,6 @@ def check_docx_missing_alt_text(file_bytes: bytes):
         # Fallback: count related images (cannot read alt reliably this way)
         img_rels = [r for r in doc.part.rels.values() if "image" in r.reltype]
         total_imgs = len(img_rels)
-        # When we can't inspect alt text, warn the user to verify
         if total_imgs:
             issues.append(
                 f"Found {total_imgs} image(s). Verify Alt Text for each (Right-click image → View Alt Text)."
@@ -80,29 +150,6 @@ def check_docx_missing_alt_text(file_bytes: bytes):
             issues.append(f"All {total_imgs} image(s) have alt text. ✅")
 
     return issues
-def suggest_alt_text_via_hf(image_bytes: bytes) -> str | None:
-    """Return a short alt-text suggestion using BLIP via HF Inference API."""
-    if not HF_KEY:
-        return None
-    r = requests.post(HF_API, headers={"Authorization": f"Bearer {HF_KEY}"}, data=image_bytes, timeout=60)
-    if r.status_code == 200:
-        out = r.json()
-        if isinstance(out, list) and out and "generated_text" in out[0]:
-            return out[0]["generated_text"][:125]  # keep it concise
-    return None
-
-def extract_docx_image_blobs(file_bytes: bytes) -> list[bytes]:
-    """Return raw image bytes from a DOCX (best-effort)."""
-    doc = Document(io.BytesIO(file_bytes))
-    blobs = []
-    for rel in doc.part.rels.values():
-        if "image" in rel.reltype:
-            try:
-                blobs.append(rel.target_part.blob)
-            except Exception:
-                pass
-    return blobs
-
 
 # -----------------------------
 # PPTX checks
@@ -134,11 +181,9 @@ def check_pptx(file_obj):
             f"Found {img_count} image(s). Verify Alt Text for each (Format Picture → Alt Text)."
         )
 
-    # Contrast placeholder (add pixel-based checks later if you want)
+    # Contrast placeholder
     issues.append("Contrast not evaluated in MVP. Aim for WCAG contrast ratio ≥ 4.5:1 for normal text.")
-
     return issues
-
 
 # -----------------------------
 # PDF checks
@@ -148,7 +193,7 @@ def pdf_is_tagged(doc) -> bool:
     try:
         cat_xref = doc.pdf_catalog()                       # catalog object xref
         key = doc.xref_get_key(cat_xref, "StructTreeRoot") # returns (type, value) or ('null','null')
-        return key is not None and key[0] != "null" and key[0] != "nil"
+        return key is not None and key[0] not in ("null", "nil")
     except Exception:
         return False
 
@@ -178,10 +223,8 @@ def check_pdf(file_obj):
     if total and (big / total) < 0.02:
         issues.append("Few/no large text spans detected; headings may be missing. Use heading styles in the source doc.")
 
-    # General reminder on link text (PDF link text extraction is unreliable)
     issues.append("Review links for descriptive text (avoid 'click here'). Edit in source, then re-export.")
     return issues
-
 
 # -----------------------------
 # File uploader & processing
@@ -194,7 +237,7 @@ results = []
 if uploaded_files:
     for file in uploaded_files:
         file_name = file.name
-        issues_list = []
+        issues_list: list[str] = []
 
         if file_name.lower().endswith(".docx"):
             # 1) Basic DOCX checks
@@ -207,17 +250,21 @@ if uploaded_files:
 
             # Merge results
             issues_list = (issues_basic or []) + (issues_alt or [])
-            # If some images are missing alt text, propose up to 3 suggestions
+
+            # 3) If some images are missing alt text, propose up to 3 suggestions
             if any("appear to lack alt text" in m for m in issues_list):
                 imgs = extract_docx_image_blobs(docx_bytes)
+                st.sidebar.write(f"Found {len(imgs)} image(s) in DOCX; generating suggestions for up to 3…")
                 suggestions = []
-                for b in imgs[:3]:
+                for idx, b in enumerate(imgs[:3], start=1):
                     s = suggest_alt_text_via_hf(b)
+                    st.sidebar.write(f"Image {idx} suggestion: {('ok' if s else 'none')}")
                     if s:
                         suggestions.append(s)
                 if suggestions:
                     issues_list.append("Alt text suggestions: " + " | ".join(suggestions))
-
+                else:
+                    issues_list.append("Alt text suggestions: (none generated)")
 
             # Reset pointer in case you read again later
             file.seek(0)
@@ -233,7 +280,6 @@ if uploaded_files:
         else:
             issues_list = ["Unsupported file type."]
 
-        # Ensure we always produce at least one message
         if not issues_list:
             issues_list = ["No major issues found."]
 
