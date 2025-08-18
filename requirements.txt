@@ -1,6 +1,7 @@
 streamlit
 python-docx
 python-pptx
-pymupdf
+pymupdf>=1.24
 pandas
 requests
+pillow
